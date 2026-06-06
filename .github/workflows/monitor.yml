@@ -3,9 +3,8 @@ name: ReSukiSU Monitor and Sync Push
 on:
   # 允许手动触发测试
   workflow_dispatch:
-  # 每 2 小时自动检查一次
-  #schedule:
-  #  - cron: '0 */2 * * *'
+  schedule:
+    - cron: '0 */1 * * *'
 
 jobs:
   check-and-sync:

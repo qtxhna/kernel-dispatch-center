@@ -10,6 +10,8 @@ on:
 jobs:
   check-and-sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
     # --------- STEP 1: 检查远端 resukisu 的状态 ---------
@@ -53,16 +55,21 @@ jobs:
         git commit -m "chore: update resukisu sha [skip ci]"
         git push
 
-    # --------- STEP 2: 进军仓库 A，更新子模块并 Push ---------
+    # --------- STEP 2: 进军仓库 A，主仓浅克隆，子模块正常更新 ---------
     - name: Sync and Push Repository A
       if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         echo "status_a=未发生代码变更" >> $GITHUB_ENV
-        git clone --recursive https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_mi845_lineage.git repo_a
+
+        # 仅浅克隆内核主仓库（省时省流量）
+        git clone --depth=1 https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_mi845_lineage.git repo_a
         cd repo_a
+
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git submodule update --remote --recursive
+
+        # 初始化并完整拉取子模块（因为 resukisu 很小，不加 --depth）
+        git submodule update --init --remote --recursive
 
         if [ -n "$(git status --porcelain)" ]; then
           git add .
@@ -71,16 +78,21 @@ jobs:
           echo "status_a=✅ 子模块已更新，已成功推送并触发编译流程！" >> $GITHUB_ENV
         fi
 
-    # --------- STEP 3: 进军仓库 B，更新子模块并 Push ---------
+    # --------- STEP 3: 进军仓库 B，主仓浅克隆，子模块正常更新 ---------
     - name: Sync and Push Repository B
       if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
       run: |
         echo "status_b=未发生代码变更" >> $GITHUB_ENV
-        git clone --recursive https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_xiaomi_sm7250.git repo_b
+
+        # 仅浅克隆内核主仓库（省时省流量）
+        git clone --depth=1 https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_xiaomi_sm7250.git repo_b
         cd repo_b
+
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git submodule update --remote --recursive
+
+        # 初始化并完整拉取子模块（因为 resukisu 很小，不加 --depth）
+        git submodule update --init --remote --recursive
 
         if [ -n "$(git status --porcelain)" ]; then
           git add .
@@ -99,7 +111,7 @@ jobs:
         TEXT="${TEXT}─"
         TEXT="${TEXT}📡 *上游依赖 (resukisu):* %0A"
         TEXT="${TEXT}• 最新提交: \`$SHORT_SHA\` %0A%0A"
-        TEXT="${TEXT}📦 *下游同步状态:* %0A"
+        TEXT="${TEXT}📦 *下游同步状态 (混合克隆模式):* %0A"
         TEXT="${TEXT}• *仓库 A (mi845):* %0A  ${{ env.status_a }} %0A"
         TEXT="${TEXT}• *仓库 B (sm7250):* %0A  ${{ env.status_b }} %0A"
         TEXT="${TEXT}─"

@@ -1,0 +1,115 @@
+name: ReSukiSU Monitor and Sync Push
+
+on:
+  # 允许手动触发测试
+  workflow_dispatch:
+  # 每 2 小时自动检查一次
+  #schedule:
+  #  - cron: '0 */2 * * *'
+
+jobs:
+  check-and-sync:
+    runs-on: ubuntu-latest
+
+    steps:
+    # --------- STEP 1: 检查远端 resukisu 的状态 ---------
+    - name: Get Remote Latest SHA
+      id: remote_info
+      run: |
+        REMOTE_SHA=$(curl -s "https://api.github.com/repos/ReSukiSU/ReSukiSU/commits/main" | jq -r '.sha')
+        if [ "$REMOTE_SHA" = "null" ] || [ -z "$REMOTE_SHA" ]; then
+          echo "❌ 无法获取远端仓库 SHA"
+          exit 1
+        fi
+        echo "remote_sha=$REMOTE_SHA" >> $GITHUB_OUTPUT
+        echo "远端最新 SHA: $REMOTE_SHA"
+
+    - name: Checkout Control Repository
+      uses: actions/checkout:v4
+
+    - name: Compare SHA
+      id: compare
+      run: |
+        RECORD_FILE="last_sha.txt"
+        LOCAL_SHA=""
+        if [ -f "$RECORD_FILE" ]; then LOCAL_SHA=$(cat $RECORD_FILE); fi
+
+        if [ "$LOCAL_SHA" != "${{ steps.remote_info.outputs.remote_sha }}" ]; then
+          echo "✨ 检测到新更新！"
+          echo "should_sync=true" >> $GITHUB_OUTPUT
+          echo "${{ steps.remote_info.outputs.remote_sha }}" > $RECORD_FILE
+        else
+          echo "✅ 已经是最新，无需操作。"
+          echo "should_sync=false" >> $GITHUB_OUTPUT
+        fi
+
+    # 如果有更新，保存新的 SHA 到仓库 C
+    - name: Update Control Repo State
+      if: steps.compare.outputs.should_sync == 'true'
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add last_sha.txt
+        git commit -m "chore: update resukisu sha [skip ci]"
+        git push
+
+    # --------- STEP 2: 进军仓库 A，更新子模块并 Push ---------
+    - name: Sync and Push Repository A
+      if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "status_a=未发生代码变更" >> $GITHUB_ENV
+        git clone --recursive https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_mi845_lineage.git repo_a
+        cd repo_a
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git submodule update --remote --recursive
+
+        if [ -n "$(git status --porcelain)" ]; then
+          git add .
+          git commit -m "chore: auto update resukisu submodule"
+          git push
+          echo "status_a=✅ 子模块已更新，已成功推送并触发编译流程！" >> $GITHUB_ENV
+        fi
+
+    # --------- STEP 3: 进军仓库 B，更新子模块并 Push ---------
+    - name: Sync and Push Repository B
+      if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
+      run: |
+        echo "status_b=未发生代码变更" >> $GITHUB_ENV
+        git clone --recursive https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_xiaomi_sm7250.git repo_b
+        cd repo_b
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git submodule update --remote --recursive
+
+        if [ -n "$(git status --porcelain)" ]; then
+          git add .
+          git commit -m "chore: auto update resukisu submodule"
+          git push
+          echo "status_b=✅ 子模块已更新，已成功推送并触发编译流程！" >> $GITHUB_ENV
+        fi
+
+    # --------- STEP 4: 向 TG 账号私发执行详情 ---------
+    - name: Send Report to Telegram
+      # 仅在“确实有更新”或“手动触发”时发送通知
+      if: (steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch') && always()
+      run: |
+        # 截取简短的 SHA 供预览
+        SHORT_SHA=$(echo "${{ steps.remote_info.outputs.remote_sha }}" | cut -c1-7)
+
+        # 组装通知文本
+        TEXT="🤖 *中央控制台同步报告* %0A"
+        TEXT="${TEXT}─"
+        TEXT="${TEXT}📡 *上游依赖 (resukisu):* %0A"
+        TEXT="${TEXT}• 最新提交: \`$SHORT_SHA\` %0A%0A"
+        TEXT="${TEXT}📦 *下游同步状态:* %0A"
+        TEXT="${TEXT}• *仓库 A (mi845):* %0A  ${{ env.status_a }} %0A"
+        TEXT="${TEXT}• *仓库 B (sm7250):* %0A  ${{ env.status_b }} %0A"
+        TEXT="${TEXT}─"
+        TEXT="${TEXT}💡 _提示: 已推送的仓库将自动开始编译内核，稍后注意接收产物消息。_"
+
+        # 调用 TG API 发送文本（支持 Markdown 格式）
+        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+          -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+          -d "text=${TEXT}" \
+          -d "parse_mode=Markdown"

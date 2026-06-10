@@ -28,7 +28,7 @@ jobs:
     - name: Checkout Control Repository
       uses: actions/checkout@v4
 
-    - name: Compare SHA
+- name: Compare SHA
       id: compare
       run: |
         RECORD_FILE="last_sha.txt"
@@ -37,8 +37,27 @@ jobs:
 
         if [ "$LOCAL_SHA" != "${{ steps.remote_info.outputs.remote_sha }}" ]; then
           echo "✨ 检测到新更新！"
-          echo "should_sync=true" >> $GITHUB_OUTPUT
-          echo "${{ steps.remote_info.outputs.remote_sha }}" > $RECORD_FILE
+
+          SHOULD_SYNC="true"
+
+          # 如果是定时任务触发，且存在历史 SHA 记录，则深入检查 kernel 目录是否有变动
+          if [ "${{ github.event_name }}" = "schedule" ] && [ -n "$LOCAL_SHA" ]; then
+            echo "📅 定时任务触发，正在检查 kernel 目录变动..."
+            COMPARE_URL="https://api.github.com/repos/ReSukiSU/ReSukiSU/compare/${LOCAL_SHA}...${{ steps.remote_info.outputs.remote_sha }}"
+            KERNEL_CHANGED=$(curl -s "$COMPARE_URL" | jq '[.files[].filename | startswith("kernel/")] | any')
+
+            if [ "$KERNEL_CHANGED" != "true" ]; then
+              echo "ℹ️ 虽然上游有更新，但 kernel 目录未发生变动，跳过本次同步。"
+              SHOULD_SYNC="false"
+            fi
+          fi
+
+          echo "should_sync=$SHOULD_SYNC" >> $GITHUB_OUTPUT
+
+          # 只有确定需要同步时，才把新 SHA 写入本地记录文件
+          if [ "$SHOULD_SYNC" = "true" ]; then
+            echo "${{ steps.remote_info.outputs.remote_sha }}" > $RECORD_FILE
+          fi
         else
           echo "✅ 已经是最新，无需操作。"
           echo "should_sync=false" >> $GITHUB_OUTPUT

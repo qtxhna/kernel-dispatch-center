@@ -70,6 +70,21 @@ jobs:
           git commit -m "chore: update resukisu sha [skip ci]"
           git push
 
+      - name: Send Advance Notification to Telegram
+        if: github.event_name == 'schedule' && steps.compare.outputs.should_sync == 'true'
+        run: |
+          SHORT_SHA=$(echo "${{ steps.remote_info.outputs.remote_sha }}" | cut -c1-7)
+
+          TEXT="🔄 *中央控制台：检测到上游内核更新* %0A"
+          TEXT="${TEXT}─"
+          TEXT="${TEXT}📡 *上游最新提交:* \`$SHORT_SHA\` %0A"
+          TEXT="${TEXT}🚀 *状态:* 检测到 kernel 目录变动，即将启动下游多仓库并行同步与编译流程..."
+
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=Markdown"
+
   sync-downstream:
     needs: check-upstream
     if: needs.check-upstream.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'

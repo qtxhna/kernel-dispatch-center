@@ -1,141 +1,126 @@
 name: ReSukiSU Monitor and Sync Push
 
 on:
-  # 允许手动触发测试
   workflow_dispatch:
   schedule:
     - cron: '25 */1 * * *'
 
 jobs:
-  check-and-sync:
+  check-upstream:
     runs-on: ubuntu-latest
+    outputs:
+      should_sync: ${{ steps.compare.outputs.should_sync }}
+      remote_sha: ${{ steps.remote_info.outputs.remote_sha }}
     permissions:
       contents: write
 
     steps:
-    # --------- STEP 1: 检查远端 resukisu 的状态 ---------
-    - name: Get Remote Latest SHA
-      id: remote_info
-      run: |
-        REMOTE_SHA=$(curl -s "https://api.github.com/repos/ReSukiSU/ReSukiSU/commits/main" | jq -r '.sha')
-        if [ "$REMOTE_SHA" = "null" ] || [ -z "$REMOTE_SHA" ]; then
-          echo "❌ 无法获取远端仓库 SHA"
-          exit 1
-        fi
-        echo "remote_sha=$REMOTE_SHA" >> $GITHUB_OUTPUT
-        echo "远端最新 SHA: $REMOTE_SHA"
+      - name: Get Remote Latest SHA
+        id: remote_info
+        run: |
+          REMOTE_SHA=$(curl -s "https://api.github.com/repos/ReSukiSU/ReSukiSU/commits/main" | jq -r '.sha')
+          if [ "$REMOTE_SHA" = "null" ] || [ -z "$REMOTE_SHA" ]; then
+            echo "❌ 无法获取远端仓库 SHA"
+            exit 1
+          fi
+          echo "remote_sha=$REMOTE_SHA" >> $GITHUB_OUTPUT
+          echo "远端最新 SHA: $REMOTE_SHA"
 
-    - name: Checkout Control Repository
-      uses: actions/checkout@v4
+      - name: Checkout Control Repository
+        uses: actions/checkout@v4
 
-- name: Compare SHA
-      id: compare
-      run: |
-        RECORD_FILE="last_sha.txt"
-        LOCAL_SHA=""
-        if [ -f "$RECORD_FILE" ]; then LOCAL_SHA=$(cat $RECORD_FILE); fi
+      - name: Compare SHA
+        id: compare
+        run: |
+          RECORD_FILE="last_sha.txt"
+          LOCAL_SHA=""
+          if [ -f "$RECORD_FILE" ]; then LOCAL_SHA=$(cat $RECORD_FILE); fi
 
-        if [ "$LOCAL_SHA" != "${{ steps.remote_info.outputs.remote_sha }}" ]; then
-          echo "✨ 检测到新更新！"
+          if [ "$LOCAL_SHA" != "${{ steps.remote_info.outputs.remote_sha }}" ]; then
+            echo "✨ 检测到新更新！"
+            SHOULD_SYNC="true"
 
-          SHOULD_SYNC="true"
+            if [ "${{ github.event_name }}" = "schedule" ] && [ -n "$LOCAL_SHA" ]; then
+              echo "📅 定时任务触发，正在检查 kernel 目录变动..."
+              COMPARE_URL="https://api.github.com/repos/ReSukiSU/ReSukiSU/compare/${LOCAL_SHA}...${{ steps.remote_info.outputs.remote_sha }}"
+              KERNEL_CHANGED=$(curl -s "$COMPARE_URL" | jq '[.files[].filename | startswith("kernel/")] | any')
 
-          # 如果是定时任务触发，且存在历史 SHA 记录，则深入检查 kernel 目录是否有变动
-          if [ "${{ github.event_name }}" = "schedule" ] && [ -n "$LOCAL_SHA" ]; then
-            echo "📅 定时任务触发，正在检查 kernel 目录变动..."
-            COMPARE_URL="https://api.github.com/repos/ReSukiSU/ReSukiSU/compare/${LOCAL_SHA}...${{ steps.remote_info.outputs.remote_sha }}"
-            KERNEL_CHANGED=$(curl -s "$COMPARE_URL" | jq '[.files[].filename | startswith("kernel/")] | any')
-
-            if [ "$KERNEL_CHANGED" != "true" ]; then
-              echo "ℹ️ 虽然上游有更新，但 kernel 目录未发生变动，跳过本次同步。"
-              SHOULD_SYNC="false"
+              if [ "$KERNEL_CHANGED" != "true" ]; then
+                echo "ℹ️ 虽然上游有更新，但 kernel 目录未发生变动，跳过本次同步。"
+                SHOULD_SYNC="false"
+              fi
             fi
+
+            echo "should_sync=$SHOULD_SYNC" >> $GITHUB_OUTPUT
+
+            if [ "$SHOULD_SYNC" = "true" ]; then
+              echo "${{ steps.remote_info.outputs.remote_sha }}" > $RECORD_FILE
+            fi
+          else
+            echo "✅ 已经是最新，无需操作。"
+            echo "should_sync=false" >> $GITHUB_OUTPUT
           fi
 
-          echo "should_sync=$SHOULD_SYNC" >> $GITHUB_OUTPUT
+      - name: Update Control Repo State
+        if: steps.compare.outputs.should_sync == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_sha.txt
+          git commit -m "chore: update resukisu sha [skip ci]"
+          git push
 
-          # 只有确定需要同步时，才把新 SHA 写入本地记录文件
-          if [ "$SHOULD_SYNC" = "true" ]; then
-            echo "${{ steps.remote_info.outputs.remote_sha }}" > $RECORD_FILE
+  sync-downstream:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo:
+          - name: "repo_a"
+            url: "qtxhna/kernel_mi845_lineage"
+            label: "仓库 A (mi845)"
+          - name: "repo_b"
+            url: "qtxhna/kernel_xiaomi_sm7250"
+            label: "仓库 B (sm7250)"
+
+    steps:
+      - name: Sync and Push
+        run: |
+          STATUS="未发生代码变更"
+
+          git clone --depth=1 https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ matrix.repo.url }}.git ${{ matrix.repo.name }}
+          cd ${{ matrix.repo.name }}
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git submodule update --init --remote --recursive
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "chore: auto update resukisu submodule"
+            git push
+            STATUS="✅ 子模块已更新，已成功推送并触发编译流程！"
           fi
-        else
-          echo "✅ 已经是最新，无需操作。"
-          echo "should_sync=false" >> $GITHUB_OUTPUT
-        fi
 
-    # 如果有更新，保存新的 SHA 到仓库 C
-    - name: Update Control Repo State
-      if: steps.compare.outputs.should_sync == 'true'
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add last_sha.txt
-        git commit -m "chore: update resukisu sha [skip ci]"
-        git push
+          echo "SYNC_STATUS=$STATUS" >> $GITHUB_ENV
 
-    # --------- STEP 2: 进军仓库 A，主仓浅克隆，子模块正常更新 ---------
-    - name: Sync and Push Repository A
-      if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        echo "status_a=未发生代码变更" >> $GITHUB_ENV
+      - name: Send Report to Telegram
+        if: always()
+        run: |
+          SHORT_SHA=$(echo "${{ needs.check-upstream.outputs.remote_sha }}" | cut -c1-7)
 
-        # 仅浅克隆内核主仓库（省时省流量）
-        git clone --depth=1 https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_mi845_lineage.git repo_a
-        cd repo_a
+          TEXT="🤖 *中央控制台同步报告 (并行模式)* %0A"
+          TEXT="${TEXT}─"
+          TEXT="${TEXT}📡 *上游依赖 (resukisu):* %0A"
+          TEXT="${TEXT}• 最新提交: \`$SHORT_SHA\` %0A%0A"
+          TEXT="${TEXT}📦 *下游同步状态:* %0A"
+          TEXT="${TEXT}• *${{ matrix.repo.label }}:* %0A  ${{ env.SYNC_STATUS }} %0A"
+          TEXT="${TEXT}─"
+          TEXT="${TEXT}💡 _提示: 已推送的仓库将自动开始编译内核，稍后注意接收产物消息。_"
 
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-        # 初始化并完整拉取子模块（因为 resukisu 很小，不加 --depth）
-        git submodule update --init --remote --recursive
-
-        if [ -n "$(git status --porcelain)" ]; then
-          git add .
-          git commit -m "chore: auto update resukisu submodule"
-          git push
-          echo "status_a=✅ 子模块已更新，已成功推送并触发编译流程！" >> $GITHUB_ENV
-        fi
-
-    # --------- STEP 3: 进军仓库 B，主仓浅克隆，子模块正常更新 ---------
-    - name: Sync and Push Repository B
-      if: steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch'
-      run: |
-        echo "status_b=未发生代码变更" >> $GITHUB_ENV
-
-        # 仅浅克隆内核主仓库（省时省流量）
-        git clone --depth=1 https://x-access-token:${{ secrets.GH_PAT }}@github.com/qtxhna/kernel_xiaomi_sm7250.git repo_b
-        cd repo_b
-
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-        # 初始化并完整拉取子模块（因为 resukisu 很小，不加 --depth）
-        git submodule update --init --remote --recursive
-
-        if [ -n "$(git status --porcelain)" ]; then
-          git add .
-          git commit -m "chore: auto update resukisu submodule"
-          git push
-          echo "status_b=✅ 子模块已更新，已成功推送并触发编译流程！" >> $GITHUB_ENV
-        fi
-
-    # --------- STEP 4: 向 TG 账号私发执行详情 ---------
-    - name: Send Report to Telegram
-      if: (steps.compare.outputs.should_sync == 'true' || github.event_name == 'workflow_dispatch') && always()
-      run: |
-        SHORT_SHA=$(echo "${{ steps.remote_info.outputs.remote_sha }}" | cut -c1-7)
-
-        TEXT="🤖 *中央控制台同步报告* %0A"
-        TEXT="${TEXT}─"
-        TEXT="${TEXT}📡 *上游依赖 (resukisu):* %0A"
-        TEXT="${TEXT}• 最新提交: \`$SHORT_SHA\` %0A%0A"
-        TEXT="${TEXT}📦 *下游同步状态 (混合克隆模式):* %0A"
-        TEXT="${TEXT}• *仓库 A (mi845):* %0A  ${{ env.status_a }} %0A"
-        TEXT="${TEXT}• *仓库 B (sm7250):* %0A  ${{ env.status_b }} %0A"
-        TEXT="${TEXT}─"
-        TEXT="${TEXT}💡 _提示: 已推送的仓库将自动开始编译内核，稍后注意接收产物消息。_"
-
-        curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
-          -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
-          -d "text=${TEXT}" \
-          -d "parse_mode=Markdown"
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_TO }}" \
+            -d "text=${TEXT}" \
+            -d "parse_mode=Markdown"
